@@ -1,9 +1,9 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  # 定时触发 - 每天北京时间早上 6:00 (UTC 22:00，此时美股刚刚收盘完2小时，数据最稳)
   schedule:
-    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+    - cron: '0 22 * * 1-5'     # 周一到周五的美国收盘后 (UTC 22:00 = 北京时间次日 06:00)
   
   # 手动触发
   workflow_dispatch:
@@ -63,8 +63,8 @@ jobs:
           # ==========================================
           # Gemini AI（主选）
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
-          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview' }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-3.1-flash-lite-preview' }}
           GEMINI_REQUEST_DELAY: '3.0'
           
           # AIHubMix（优先于 OPENAI_API_KEY，自动适配 base_url，推荐国内用户）
@@ -83,6 +83,11 @@ jobs:
           # 数据源
           # ==========================================
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          
+          # ==========================================
+          # Agent 模式配置 ⬅️ 新增！
+          # ==========================================
+          AGENT_MODE: ${{ vars.AGENT_MODE || secrets.AGENT_MODE || 'true' }}
           
           # ==========================================
           # 搜索服务
@@ -144,8 +149,8 @@ jobs:
           # ==========================================
           # 自选股配置
           # ==========================================
-          STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST || '600519' }}
-          MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'cn' }}
+          STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST || 'TSLA,NVDA,ETH-USD,QQQ' }}
+          MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'us' }}
           
           # ==========================================
           # 运行配置 ⬅️ 新增！
