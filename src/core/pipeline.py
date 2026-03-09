@@ -104,6 +104,70 @@ class StockAnalysisPipeline:
             logger.info("搜索服务已启用 (Tavily/SerpAPI)")
         else:
             logger.warning("搜索服务未启用（未配置 API Key）")
+
+    def _get_binance_data(self, code: str, days: int = 60):
+        """专属币安历史K线获取引擎"""
+        import requests
+        import pandas as pd
+        from datetime import datetime
+        
+        symbol = code.upper().replace("-USD", "USDT")
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1d&limit={days}"
+        try:
+            resp = requests.get(url, timeout=10)
+            data = resp.json()
+            if not isinstance(data, list) or not data:
+                return None, "binance"
+            
+            records =[]
+            for row in data:
+                records.append({
+                    "date": datetime.fromtimestamp(row[0]/1000).date(),
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[5]),
+                    "amount": float(row[7])
+                })
+            df = pd.DataFrame(records)
+            df['pct_chg'] = df['close'].pct_change() * 100
+            df['pct_chg'] = df['pct_chg'].fillna(0)
+            df['code'] = code
+            return df, "Binance API"
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Binance 历史数据获取失败: {e}")
+            return None, "binance"
+
+    def _get_binance_realtime(self, code: str):
+        """专属币安实时行情获取引擎"""
+        import requests
+        
+        symbol = code.upper().replace("-USD", "USDT")
+        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+        try:
+            resp = requests.get(url, timeout=10)
+            data = resp.json()
+            
+            class BinanceQuote:
+                pass
+            quote = BinanceQuote()
+            quote.name = code.replace("-USD", "")  # 例如 ETH
+            quote.price = float(data['lastPrice'])
+            quote.change_pct = float(data['priceChangePercent'])
+            quote.open_price = float(data['openPrice'])
+            quote.high = float(data['highPrice'])
+            quote.low = float(data['lowPrice'])
+            quote.volume = float(data['volume'])
+            quote.amount = float(data['quoteVolume'])
+            quote.turnover_rate = None
+            quote.volume_ratio = 1.0  
+            return quote
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Binance 实时数据获取失败: {e}")
+            return None
     
     def fetch_and_save_stock_data(
         self, 
@@ -143,7 +207,10 @@ class StockAnalysisPipeline:
 
             # 从数据源获取数据
             logger.info(f"{stock_name}({code}) 开始从数据源获取数据...")
-            df, source_name = self.fetcher_manager.get_daily_data(code, days=30)
+            if "-USD" in code.upper():
+                df, source_name = self._get_binance_data(code, days=60)
+            else:
+                df, source_name = self.fetcher_manager.get_daily_data(code, days=60)
 
             if df is None or df.empty:
                 return False, "获取数据为空"
@@ -186,17 +253,23 @@ class StockAnalysisPipeline:
             # Step 1: 获取实时行情（量比、换手率等）- 使用统一入口，自动故障切换
             realtime_quote = None
             try:
-                realtime_quote = self.fetcher_manager.get_realtime_quote(code)
+                # 智能路由：加密货币实时数据走币安
+                if "-USD" in code.upper():
+                    realtime_quote = self._get_binance_realtime(code)
+                else:
+                    realtime_quote = self.fetcher_manager.get_realtime_quote(code)
+                
+                # 以下这段统一处理逻辑，必须和上面的 if/else 平齐
                 if realtime_quote:
                     # 使用实时行情返回的真实股票名称
-                    if realtime_quote.name:
+                    if hasattr(realtime_quote, 'name') and realtime_quote.name:
                         stock_name = realtime_quote.name
                     # 兼容不同数据源的字段（有些数据源可能没有 volume_ratio）
                     volume_ratio = getattr(realtime_quote, 'volume_ratio', None)
                     turnover_rate = getattr(realtime_quote, 'turnover_rate', None)
                     logger.info(f"{stock_name}({code}) 实时行情: 价格={realtime_quote.price}, "
                               f"量比={volume_ratio}, 换手率={turnover_rate}% "
-                              f"(来源: {realtime_quote.source.value if hasattr(realtime_quote, 'source') else 'unknown'})")
+                              f"(来源: {getattr(realtime_quote.source, 'value', 'unknown') if hasattr(realtime_quote, 'source') else 'Binance'})")
                 else:
                     logger.info(f"{stock_name}({code}) 实时行情获取失败或已禁用，将使用历史数据进行分析")
             except Exception as e:
