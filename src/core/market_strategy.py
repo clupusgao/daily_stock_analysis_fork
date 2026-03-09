@@ -86,46 +86,46 @@ CN_BLUEPRINT = MarketStrategyBlueprint(
 
 US_BLUEPRINT = MarketStrategyBlueprint(
     region="us",
-    title="US Market Regime Strategy",
-    positioning="Focus on index trend, macro narrative, and sector rotation to define next-session risk posture.",
+    title="全球宏观与风险资产复盘策略",
+    positioning="聚焦指数趋势、全球地缘政治叙事与资金流动，定义下一个交易日的风险敞口（涵盖美股与加密货币）。无论分析什么标的，必须100%使用简体中文输出！",
     principles=[
-        "Read market regime from S&P 500, Nasdaq, and Dow alignment first.",
-        "Separate beta move from theme-driven alpha rotation.",
-        "Translate recap into actionable risk-on/risk-off stance with clear invalidation points.",
+        "优先从标普500、纳斯达克以及避险/风险资产（如比特币、VIX恐慌指数）的联动中读取市场情绪。",
+        "将宏观政策（如美联储利率）和突发新闻（如战争冲突）映射到资产的风险偏好中。",
+        "【语言最高指令】：无论检索到的新闻是英文还是其他语言，最终的复盘报告必须严格、绝对地使用【简体中文（Simplified Chinese）】输出，绝不允许出现哪怕一段英文！"
     ],
     dimensions=[
         StrategyDimension(
-            name="Trend Regime",
-            objective="Classify the market as momentum, range, or risk-off.",
+            name="趋势与结构",
+            objective="将当前市场分类为动能向上、区间震荡或极端避险（Risk-off）。",
             checkpoints=[
-                "Are SPX/NDX/DJI directionally aligned",
-                "Did volume confirm the move",
-                "Are key index levels reclaimed or lost",
+                "美股三大股指与核心加密货币（BTC/ETH）是否同向共振",
+                "成交量是否确认了当前的极端波动",
+                "关键整数关口或支撑阻力位的得失情况",
             ],
         ),
         StrategyDimension(
-            name="Macro & Flows",
-            objective="Map policy/rates narrative into equity risk appetite.",
+            name="宏观叙事与流动性",
+            objective="评估全球资金的避险与追风情绪。",
             checkpoints=[
-                "Treasury yield and USD implications",
-                "Breadth and leadership concentration",
-                "Defensive vs growth factor rotation",
+                "美债收益率与美元指数的压迫感",
+                "VIX恐慌指数的异动及其隐含的黑天鹅风险",
+                "战争、地缘冲突对市场流动性的真实抽水效应",
             ],
         ),
         StrategyDimension(
-            name="Sector Themes",
-            objective="Identify persistent leaders and vulnerable laggards.",
+            name="核心巨头与主线",
+            objective="识别当前市场最吸金的主线或最脆弱的板块。",
             checkpoints=[
-                "AI/semiconductor/software trend persistence",
-                "Energy/financials sensitivity to macro data",
-                "Volatility signals from VIX and large-cap earnings",
+                "AI科技巨头（英伟达/微软/特斯拉）的趋势延续性",
+                "马斯克等核心领袖言论对特定资产（如DOGE/TSLA）的情绪刺激",
+                "避险资金是否在大规模涌入黄金或加密货币",
             ],
         ),
     ],
     action_framework=[
-        "Risk-on: broad index breakout with expanding participation.",
-        "Neutral: mixed index signals; focus on selective relative strength.",
-        "Risk-off: failed breakouts and rising volatility; prioritize capital preservation.",
+        "Risk-on（风险偏好上升）：指数广泛突破，参与度增加，可适当加仓风险资产。",
+        "Neutral（中性）：多空分歧巨大，信号混合，建议控制仓位观望。",
+        "Risk-off（极端避险）：波动率飙升，技术面破位，优先保护本金，增加现金或避险资产配置。",
     ],
 )
 
