@@ -106,82 +106,92 @@ class StockAnalysisPipeline:
             logger.warning("搜索服务未启用（未配置 API Key）")
 
     def _get_crypto_data(self, code: str, days: int = 60):
-        """专属加密货币历史K线引擎 (Binance.US 完美适配云端美国IP)"""
+        """专属加密货币历史K线引擎 (Kraken API - 无视云端封锁)"""
         import requests
         import pandas as pd
         from datetime import datetime
-        
-        symbol = code.upper().replace("-USD", "USDT")
-        url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval=1d&limit={days}"
+
+        # ETH-USD 转换为 Kraken 认识的 ETHUSD
+        symbol = code.upper().replace("-", "") 
+        url = f"https://api.kraken.com/0/public/OHLC?pair={symbol}&interval=1440"
         try:
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             resp = requests.get(url, headers=headers, timeout=10)
-            
-            if resp.status_code != 200:
-                import logging
-                logging.getLogger(__name__).error(f"Binance.US 历史请求拒绝: HTTP {resp.status_code}")
-                return None, "binance.us"
-                
             data = resp.json()
-            if not isinstance(data, list) or not data:
-                return None, "binance.us"
-            
+
+            if data.get('error'):
+                return None, "kraken"
+
+            # Kraken 返回的键名是动态的（如 XETHZUSD），动态提取
+            result = data.get('result', {})
+            pair_key =[k for k in result.keys() if k != 'last'][0]
+            klines = result[pair_key]
+
             records =[]
-            for row in data:
+            # 提取最后 days 天的数据
+            for row in klines[-days:]:
                 records.append({
-                    "date": datetime.fromtimestamp(row[0]/1000).date(),
+                    "date": datetime.fromtimestamp(row[0]).date(),
                     "open": float(row[1]),
                     "high": float(row[2]),
                     "low": float(row[3]),
                     "close": float(row[4]),
-                    "volume": float(row[5]),
-                    "amount": float(row[7])
+                    "volume": float(row[6]),
+                    "amount": float(row[4]) * float(row[6])
                 })
+
             df = pd.DataFrame(records)
+            if df.empty:
+                return None, "kraken"
+
             df['pct_chg'] = df['close'].pct_change() * 100
             df['pct_chg'] = df['pct_chg'].fillna(0)
             df['code'] = code
-            return df, "Binance.US"
+            return df, "Kraken API"
         except Exception as e:
             import logging
-            logging.getLogger(__name__).error(f"Binance.US 历史数据获取异常: {e}")
-            return None, "binance.us"
+            logging.getLogger(__name__).error(f"Kraken 历史获取异常: {e}")
+            return None, "kraken"
 
     def _get_crypto_realtime(self, code: str):
-        """专属加密货币实时行情引擎 (Binance.US 完美适配云端美国IP)"""
+        """专属加密货币实时行情引擎 (Kraken API - 无视云端封锁)"""
         import requests
-        
-        symbol = code.upper().replace("-USD", "USDT")
-        url = f"https://api.binance.us/api/v3/ticker/24hr?symbol={symbol}"
+
+        symbol = code.upper().replace("-", "")
+        url = f"https://api.kraken.com/0/public/Ticker?pair={symbol}"
         try:
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             resp = requests.get(url, headers=headers, timeout=10)
-            
-            if resp.status_code != 200:
-                import logging
-                logging.getLogger(__name__).error(f"Binance.US 实时请求拒绝: HTTP {resp.status_code}")
-                return None
-                
             data = resp.json()
-            
+
+            if data.get('error'):
+                return None
+
+            result = data.get('result', {})
+            pair_key = list(result.keys())[0]
+            ticker = result[pair_key]
+
             class CryptoQuote: pass
             quote = CryptoQuote()
             quote.name = code.replace("-USD", "")
-            
-            quote.price = float(data['lastPrice'])
-            quote.change_pct = float(data['priceChangePercent'])
-            quote.open_price = float(data['openPrice'])
-            quote.high = float(data['highPrice'])
-            quote.low = float(data['lowPrice'])
-            quote.volume = float(data['volume'])
-            quote.amount = float(data['quoteVolume'])
-            
+
+            # Kraken 的数据格式：c[0]为现价，o为开盘价
+            quote.price = float(ticker['c'][0])
+            quote.open_price = float(ticker['o'])
+            quote.high = float(ticker['h'][0])
+            quote.low = float(ticker['l'][0])
+            quote.volume = float(ticker['v'][0])
+            quote.amount = quote.volume * quote.price
+
+            quote.pre_close = float(ticker['o'])
+            quote.change_pct = (quote.price - quote.pre_close) / quote.pre_close * 100
+
             quote.turnover_rate = None
-            quote.volume_ratio = 1.0  
+            quote.volume_ratio = 1.0
             return quote
         except Exception as e:
             import logging
-            logging.getLogger(__name__).error(f"Binance.US 实时数据获取异常: {e}")
+            logging.getLogger(__name__).error(f"Kraken 实时获取异常: {e}")
             return None
     
     def fetch_and_save_stock_data(
