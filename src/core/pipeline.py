@@ -106,79 +106,82 @@ class StockAnalysisPipeline:
             logger.warning("搜索服务未启用（未配置 API Key）")
 
     def _get_crypto_data(self, code: str, days: int = 60):
-        """专属加密货币历史K线引擎 (YFinance 重构极简版)"""
-        import yfinance as yf
+        """专属加密货币历史K线引擎 (Binance.US 完美适配云端美国IP)"""
+        import requests
         import pandas as pd
+        from datetime import datetime
+        
+        symbol = code.upper().replace("-USD", "USDT")
+        url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval=1d&limit={days}"
         try:
-            ticker = yf.Ticker(code)
-            # 使用 history 接口，最稳定，无多重索引报错
-            df_yf = ticker.history(period=f"{days}d")
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            resp = requests.get(url, headers=headers, timeout=10)
             
-            if df_yf is None or df_yf.empty:
-                return None, "yfinance"
-            
-            df_yf = df_yf.reset_index()
-            date_col = 'Date' if 'Date' in df_yf.columns else 'Datetime'
+            if resp.status_code != 200:
+                import logging
+                logging.getLogger(__name__).error(f"Binance.US 历史请求拒绝: HTTP {resp.status_code}")
+                return None, "binance.us"
+                
+            data = resp.json()
+            if not isinstance(data, list) or not data:
+                return None, "binance.us"
             
             records =[]
-            for _, row in df_yf.iterrows():
-                # 核心修复：处理 yfinance 烦人的 UTC 时区问题
-                dt = row[date_col]
-                if hasattr(dt, 'tz') and dt.tz is not None:
-                    dt = dt.tz_convert(None)
-                
+            for row in data:
                 records.append({
-                    "date": dt.date() if hasattr(dt, 'date') else dt,
-                    "open": float(row['Open']),
-                    "high": float(row['High']),
-                    "low": float(row['Low']),
-                    "close": float(row['Close']),
-                    "volume": float(row['Volume']),
-                    "amount": float(row['Volume']) * float(row['Close'])
+                    "date": datetime.fromtimestamp(row[0]/1000).date(),
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[5]),
+                    "amount": float(row[7])
                 })
             df = pd.DataFrame(records)
             df['pct_chg'] = df['close'].pct_change() * 100
             df['pct_chg'] = df['pct_chg'].fillna(0)
             df['code'] = code
-            return df, "YFinance Crypto"
+            return df, "Binance.US"
         except Exception as e:
             import logging
-            logging.getLogger(__name__).error(f"Crypto历史获取失败: {e}")
-            return None, "yfinance"
+            logging.getLogger(__name__).error(f"Binance.US 历史数据获取异常: {e}")
+            return None, "binance.us"
 
     def _get_crypto_realtime(self, code: str):
-        """专属加密货币实时行情引擎 (YFinance 重构极简版)"""
-        import yfinance as yf
+        """专属加密货币实时行情引擎 (Binance.US 完美适配云端美国IP)"""
+        import requests
+        
+        symbol = code.upper().replace("-USD", "USDT")
+        url = f"https://api.binance.us/api/v3/ticker/24hr?symbol={symbol}"
         try:
-            ticker = yf.Ticker(code)
-            hist = ticker.history(period="5d")
-            if hist.empty:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            resp = requests.get(url, headers=headers, timeout=10)
+            
+            if resp.status_code != 200:
+                import logging
+                logging.getLogger(__name__).error(f"Binance.US 实时请求拒绝: HTTP {resp.status_code}")
                 return None
                 
+            data = resp.json()
+            
             class CryptoQuote: pass
             quote = CryptoQuote()
             quote.name = code.replace("-USD", "")
             
-            latest = hist.iloc[-1]
-            quote.price = float(latest['Close'])
-            quote.open_price = float(latest['Open'])
-            quote.high = float(latest['High'])
-            quote.low = float(latest['Low'])
-            quote.volume = float(latest['Volume'])
-            quote.amount = quote.volume * quote.price
+            quote.price = float(data['lastPrice'])
+            quote.change_pct = float(data['priceChangePercent'])
+            quote.open_price = float(data['openPrice'])
+            quote.high = float(data['highPrice'])
+            quote.low = float(data['lowPrice'])
+            quote.volume = float(data['volume'])
+            quote.amount = float(data['quoteVolume'])
             
-            if len(hist) > 1:
-                quote.pre_close = float(hist['Close'].iloc[-2])
-                quote.change_pct = (quote.price - quote.pre_close) / quote.pre_close * 100
-            else:
-                quote.change_pct = 0.0
-                
             quote.turnover_rate = None
             quote.volume_ratio = 1.0  
             return quote
         except Exception as e:
             import logging
-            logging.getLogger(__name__).error(f"Crypto实时获取失败: {e}")
+            logging.getLogger(__name__).error(f"Binance.US 实时数据获取异常: {e}")
             return None
     
     def fetch_and_save_stock_data(
