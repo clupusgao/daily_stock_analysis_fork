@@ -193,7 +193,19 @@ class StockAnalysisPipeline:
             import logging
             logging.getLogger(__name__).error(f"Kraken 实时获取异常: {e}")
             return None
-    
+
+    def _get_fear_and_greed_index(self):
+        """华尔街级宏观插件：获取全球加密市场恐慌与贪婪指数"""
+        import requests
+        try:
+            resp = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5)
+            data = resp.json()
+            value = data['data'][0]['value']
+            classification = data['data'][0]['value_classification']
+            return f"当前指数: {value} ({classification}) - [说明: 0极端恐慌, 100极端贪婪]"
+        except Exception as e:
+            return "获取宏观情绪指数失败"
+            
     def fetch_and_save_stock_data(
         self, 
         code: str,
