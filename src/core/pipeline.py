@@ -131,7 +131,7 @@ class StockAnalysisPipeline:
             # 提取最后 days 天的数据
             for row in klines[-days:]:
                 records.append({
-                    "date": datetime.fromtimestamp(row[0]).date(),
+                    "date": pd.to_datetime(row[0], unit='s'),  # 💡 改用这行：生成绝对标准的 Pandas 时间
                     "open": float(row[1]),
                     "high": float(row[2]),
                     "low": float(row[3]),
@@ -327,17 +327,39 @@ class StockAnalysisPipeline:
             # Step 3: 趋势分析（基于交易理念）
             trend_result: Optional[TrendAnalysisResult] = None
             try:
-                end_date = date.today()
-                start_date = end_date - timedelta(days=89)  # ~60 trading days for MA60
-                historical_bars = self.db.get_data_range(code, start_date, end_date)
-                if historical_bars:
-                    df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
-                    # Issue #234: Augment with realtime for intraday MA calculation
-                    if self.config.enable_realtime_quote and realtime_quote:
-                        df = self._augment_historical_with_realtime(df, realtime_quote, code)
-                    trend_result = self.trend_analyzer.analyze(df, code)
-                    logger.info(f"{stock_name}({code}) 趋势分析: {trend_result.trend_status.value}, "
-                              f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}")
+                if "-USD" in code.upper():
+                    # ==========================================
+                    # 💡 核心突破：加密货币直接在内存中硬算，彻底绕过数据库限制！
+                    # ==========================================
+                    logger.info(f"{stock_name}({code}) 正在内存中计算加密货币均线...")
+                    df_crypto, _ = self._get_crypto_data(code, days=60)
+                    if df_crypto is not None and not df_crypto.empty:
+                        # 确保日期格式被计算引擎识别
+                        df_crypto['date'] = pd.to_datetime(df_crypto['date'])
+                        df_crypto = df_crypto.sort_values('date').reset_index(drop=True)
+                        
+                        # 把刚才拿到的实时现价打入最后一根 K 线，确保乖离率绝对精确
+                        if realtime_quote and hasattr(realtime_quote, 'price') and realtime_quote.price > 0:
+                            df_crypto.loc[df_crypto.index[-1], 'close'] = realtime_quote.price
+                            
+                        # 内存直连！直接把数据喂给趋势分析器
+                        trend_result = self.trend_analyzer.analyze(df_crypto, code)
+                        logger.info(f"{stock_name}({code}) 加密均线计算成功! MA5={getattr(trend_result, 'ma5', 0)}")
+                else:
+                    # ==========================================
+                    # 原有股票逻辑：老老实实从数据库读取
+                    # ==========================================
+                    end_date = date.today()
+                    start_date = end_date - timedelta(days=89)  # ~60 trading days for MA60
+                    historical_bars = self.db.get_data_range(code, start_date, end_date)
+                    if historical_bars:
+                        df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
+                        # Issue #234: Augment with realtime for intraday MA calculation
+                        if self.config.enable_realtime_quote and realtime_quote:
+                            df = self._augment_historical_with_realtime(df, realtime_quote, code)
+                        trend_result = self.trend_analyzer.analyze(df, code)
+                        logger.info(f"{stock_name}({code}) 趋势分析: {trend_result.trend_status.value}, "
+                                  f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}")
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 趋势分析失败: {e}", exc_info=True)
 
