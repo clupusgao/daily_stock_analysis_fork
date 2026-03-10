@@ -106,25 +106,29 @@ class StockAnalysisPipeline:
             logger.warning("搜索服务未启用（未配置 API Key）")
 
     def _get_crypto_data(self, code: str, days: int = 60):
-        """专属加密货币历史K线引擎 (YFinance)"""
+        """专属加密货币历史K线引擎 (YFinance 重构极简版)"""
         import yfinance as yf
         import pandas as pd
         try:
-            df_yf = yf.download(code, period=f"{days}d", progress=False)
-            if df_yf.empty:
+            ticker = yf.Ticker(code)
+            # 使用 history 接口，最稳定，无多重索引报错
+            df_yf = ticker.history(period=f"{days}d")
+            
+            if df_yf is None or df_yf.empty:
                 return None, "yfinance"
             
-            # 兼容不同版本的 yfinance 数据结构
-            if isinstance(df_yf.columns, pd.MultiIndex):
-                df_yf.columns = df_yf.columns.droplevel(1)
-                
             df_yf = df_yf.reset_index()
             date_col = 'Date' if 'Date' in df_yf.columns else 'Datetime'
             
             records =[]
             for _, row in df_yf.iterrows():
+                # 核心修复：处理 yfinance 烦人的 UTC 时区问题
+                dt = row[date_col]
+                if hasattr(dt, 'tz') and dt.tz is not None:
+                    dt = dt.tz_convert(None)
+                
                 records.append({
-                    "date": pd.to_datetime(row[date_col]).date(),
+                    "date": dt.date() if hasattr(dt, 'date') else dt,
                     "open": float(row['Open']),
                     "high": float(row['High']),
                     "low": float(row['Low']),
@@ -143,28 +147,28 @@ class StockAnalysisPipeline:
             return None, "yfinance"
 
     def _get_crypto_realtime(self, code: str):
-        """专属加密货币实时行情引擎 (YFinance)"""
+        """专属加密货币实时行情引擎 (YFinance 重构极简版)"""
         import yfinance as yf
         try:
             ticker = yf.Ticker(code)
-            todays_data = ticker.history(period="1d")
-            if todays_data.empty:
+            hist = ticker.history(period="5d")
+            if hist.empty:
                 return None
-            
+                
             class CryptoQuote: pass
             quote = CryptoQuote()
             quote.name = code.replace("-USD", "")
-            quote.price = float(todays_data['Close'].iloc[-1])
-            quote.open_price = float(todays_data['Open'].iloc[-1])
-            quote.high = float(todays_data['High'].iloc[-1])
-            quote.low = float(todays_data['Low'].iloc[-1])
-            quote.volume = float(todays_data['Volume'].iloc[-1])
+            
+            latest = hist.iloc[-1]
+            quote.price = float(latest['Close'])
+            quote.open_price = float(latest['Open'])
+            quote.high = float(latest['High'])
+            quote.low = float(latest['Low'])
+            quote.volume = float(latest['Volume'])
             quote.amount = quote.volume * quote.price
             
-            # 计算涨跌幅
-            hist_5d = ticker.history(period="5d")
-            if len(hist_5d) > 1:
-                quote.pre_close = float(hist_5d['Close'].iloc[-2])
+            if len(hist) > 1:
+                quote.pre_close = float(hist['Close'].iloc[-2])
                 quote.change_pct = (quote.price - quote.pre_close) / quote.pre_close * 100
             else:
                 quote.change_pct = 0.0
