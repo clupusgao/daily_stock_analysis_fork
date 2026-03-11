@@ -622,97 +622,87 @@ class StockAnalysisPipeline:
         """
         try:
             from src.agent.factory import build_agent_executor
-
-            # Build executor from shared factory
             executor = build_agent_executor(self.config, getattr(self.config, 'agent_skills', None) or None)
 
-            # ==========================================
-            # 🚀 宏观插件：获取恐慌贪婪指数
-            # ==========================================
-            fng_index = None
-            if "-USD" in code.upper():
-                fng_index = self._get_fear_and_greed_index()
-
-            # Build initial context
             initial_context = {
                 "stock_code": code,
                 "stock_name": stock_name,
                 "report_type": report_type.value,
             }
-            
             if realtime_quote:
                 initial_context["realtime_quote"] = self._safe_to_dict(realtime_quote)
             if chip_data:
                 initial_context["chip_distribution"] = self._safe_to_dict(chip_data)
-            if fng_index:
-                initial_context["macro_sentiment_fng"] = fng_index
 
             # ==========================================
-            # 💡 核心注入：在 Agent 模式调用 Kraken 引擎并计算均线
+            # 🚀 终极降维打击：Prompt Injection (贴脸数据注入)
             # ==========================================
+            crypto_injection = ""
             if "-USD" in code.upper():
+                # 注入贪婪指数
+                fng_index = self._get_fear_and_greed_index()
+                
                 import pandas as pd
                 df_c = self._get_crypto_data(code, days=60)
                 if df_c is not None and not df_c.empty:
-                    # 追加实时现价
+                    # 稳健追加最新价
                     if realtime_quote and hasattr(realtime_quote, 'price') and realtime_quote.price > 0:
-                        df_c.loc[len(df_c)] = {'close': realtime_quote.price}
+                        new_row = pd.DataFrame([{'close': realtime_quote.price}])
+                        df_c = pd.concat([df_c, new_row], ignore_index=True)
                     
-                    # 极速手算均线
+                    # 计算精确均线
                     ma5 = df_c['close'].rolling(5).mean().iloc[-1]
                     ma10 = df_c['close'].rolling(10).mean().iloc[-1]
                     ma20 = df_c['close'].rolling(20).mean().iloc[-1]
                     
                     if pd.notna(ma20):
-                        # 强制把算好的均线塞进 Agent 的初始上下文中！
-                        initial_context['crypto_moving_averages'] = {
-                            "MA5": round(float(ma5), 2), 
-                            "MA10": round(float(ma10), 2), 
-                            "MA20": round(float(ma20), 2)
-                        }
-                        logger.info(f"{stock_name}({code}) Agent内存均线注入成功! MA5={round(ma5, 2)}")
+                        price = realtime_quote.price
+                        bias = round((price - ma5) / ma5 * 100, 2)
+                        
+                        # 💡 核心指令：将数据直接写成纯文本，强行命令大模型必须使用！
+                        crypto_injection = (
+                            f"\n\n【🚨 核心最高指令：强制使用以下行情数据】\n"
+                            f"注意：常规行情工具已失效！在填写 Markdown 表格和分析时，"
+                            f"你必须直接提取并使用以下量化数据，**绝不允许填0或未知**：\n"
+                            f"- 当前价: {price}\n"
+                            f"- MA5: {round(ma5, 2)}\n"
+                            f"- MA10: {round(ma10, 2)}\n"
+                            f"- MA20: {round(ma20, 2)}\n"
+                            f"- 乖离率(MA5): {bias}%\n"
+                            f"- 恐慌贪婪指数: {fng_index}\n"
+                        )
+                        logger.info(f"{stock_name}({code}) 准备通过 Prompt 贴脸注入均线数据！")
 
-            # 运行 Agent
-            message = f"请分析股票 {code} ({stock_name})，并生成决策仪表盘报告。"
+            # 运行 Agent（直接把数据拼在它每次都要阅读的任务指令里）
+            message = f"请分析股票 {code} ({stock_name})，并生成决策仪表盘报告。{crypto_injection}"
             agent_result = executor.run(message, context=initial_context)
 
-            # 转换为 AnalysisResult (保留原装转换引擎，绝对不报错)
+            # ==========================================
+            # 以下保留原装的日志记录和数据保存逻辑
+            # ==========================================
             result = self._agent_result_to_analysis_result(agent_result, code, stock_name, report_type, query_id)
             resolved_stock_name = result.name if result and result.name else stock_name
 
-            # 保存新闻情报到数据库 (保留原装逻辑)
             if self.search_service.is_available:
                 try:
                     news_response = self.search_service.search_stock_news(
-                        stock_code=code,
-                        stock_name=resolved_stock_name,
-                        max_results=5
+                        stock_code=code, stock_name=resolved_stock_name, max_results=5
                     )
                     if news_response.success and news_response.results:
                         query_context = self._build_query_context(query_id=query_id)
                         self.db.save_news_intel(
-                            code=code,
-                            name=resolved_stock_name,
-                            dimension="latest_news",
-                            query=news_response.query,
-                            response=news_response,
-                            query_context=query_context
+                            code=code, name=resolved_stock_name, dimension="latest_news",
+                            query=news_response.query, response=news_response, query_context=query_context
                         )
-                        logger.info(f"[{code}] Agent 模式: 新闻情报已保存 {len(news_response.results)} 条")
                 except Exception as e:
                     logger.warning(f"[{code}] Agent 模式保存新闻情报失败: {e}")
 
-            # 保存分析历史记录 (保留原装逻辑)
             if result:
                 try:
                     initial_context["stock_name"] = resolved_stock_name
                     self.db.save_analysis_history(
-                        result=result,
-                        query_id=query_id,
-                        report_type=report_type.value,
-                        news_content=None,
-                        context_snapshot=initial_context,
-                        save_snapshot=self.save_context_snapshot
+                        result=result, query_id=query_id, report_type=report_type.value,
+                        news_content=None, context_snapshot=initial_context, save_snapshot=self.save_context_snapshot
                     )
                 except Exception as e:
                     logger.warning(f"[{code}] 保存 Agent 分析历史失败: {e}")
