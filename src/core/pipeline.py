@@ -105,59 +105,43 @@ class StockAnalysisPipeline:
         else:
             logger.warning("搜索服务未启用（未配置 API Key）")
 
-    def _get_crypto_data(self, code: str, days: int = 100): # 💡 提取100天，确保均线计算充分
-        """原生 Kraken API 引擎 (完美适配本地数据库)"""
+    def _get_crypto_data(self, code: str, days: int = 150): # 💡 提取 150 天，喂饱 MA60/120 的计算！
+        """原生 Kraken API 引擎 (纯净输出，完美模拟 DB 格式)"""
         import requests, pandas as pd
         from datetime import datetime
-        
         symbol = code.upper().replace("-USD", "USD").replace("-", "") 
         url = f"https://api.kraken.com/0/public/OHLC?pair={symbol}&interval=1440"
-        
         try:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            headers = {'User-Agent': 'Mozilla/5.0'}
             res = requests.get(url, headers=headers, timeout=10)
             data = res.json()
-            
-            if data.get('error'): return None, "kraken_error"
+            if data.get('error'): return None
                 
             result = data.get('result', {})
             pair_key =[k for k in result.keys() if k != 'last'][0]
             klines = result[pair_key]
             
-            records = []
+            records =[]
             for row in klines[-days:]:
-                dt_str = datetime.fromtimestamp(row[0]).strftime('%Y-%m-%d')
+                # 💡 核心修复：必须生成原生的 datetime.date 对象，这正是引擎期望的格式！
+                dt_obj = datetime.fromtimestamp(row[0]).date()
                 records.append({
-                    "date": dt_str,
-                    "trade_date": dt_str,
+                    "date": dt_obj,
                     "open": float(row[1]),
                     "high": float(row[2]),
                     "low": float(row[3]),
                     "close": float(row[4]),
                     "volume": float(row[6]),
-                    "amount": float(row[4]) * float(row[6])
+                    "amount": float(row[4]) * float(row[6]),
+                    "turnover": 0.0,
+                    "code": code
                 })
-                
             df = pd.DataFrame(records)
-            if df.empty: return None, "kraken_empty"
-                
             df['pct_chg'] = df['close'].pct_change() * 100
             df['pct_chg'] = df['pct_chg'].fillna(0)
-            df['turnover'] = 0.0
-            df['code'] = code
-            
-            # ==========================================
-            # 💡 核心防御：存入数据库前，强制算好均线！
-            # ==========================================
-            df['ma5'] = df['close'].rolling(window=5).mean()
-            df['ma10'] = df['close'].rolling(window=10).mean()
-            df['ma20'] = df['close'].rolling(window=20).mean()
-            df = df.dropna().reset_index(drop=True) # 扔掉算不出均线的最早 20 天
-            
-            return df, "Kraken API"
-            
+            return df
         except Exception as e:
-            return None, "kraken_exception"
+            return None
 
     def _get_crypto_realtime(self, code: str):
         """原生 Kraken API 实时引擎"""
@@ -240,20 +224,18 @@ class StockAnalysisPipeline:
                 return True, None
 
             # 从数据源获取数据
-            logger.info(f"{stock_name}({code}) 开始从数据源获取数据...")
             if "-USD" in code.upper():
-                df, source_name = self._get_crypto_data(code, days=60)  # <-- 改成 _get_crypto_data
-            else:
-                df, source_name = self.fetcher_manager.get_daily_data(code, days=60)
-
+                logger.info(f"{stock_name}({code}) 🚀 加密货币跳过本地数据库，直连内存引擎")
+                return True, None  # 💡 核心：直接返回成功，绝对不触发数据库报错！
+                
+            logger.info(f"{stock_name}({code}) 开始从数据源获取数据...")
+            df, source_name = self.fetcher_manager.get_daily_data(code, days=60)
+            
             if df is None or df.empty:
                 return False, "获取数据为空"
 
             # 保存到数据库
             saved_count = self.db.save_daily_data(df, code, source_name)
-            logger.info(f"{stock_name}({code}) 数据保存成功（来源: {source_name}，新增 {saved_count} 条）")
-
-            return True, None
 
         except Exception as e:
             error_msg = f"获取/保存数据失败: {str(e)}"
@@ -336,60 +318,49 @@ class StockAnalysisPipeline:
             # Step 3: 趋势分析（基于交易理念）
             trend_result: Optional[TrendAnalysisResult] = None
             try:
-                # 🌟 真正的众生平等：加密货币与美股统一走数据库原生逻辑
-                end_date = date.today()
-                start_date = end_date - timedelta(days=89)
-                historical_bars = self.db.get_data_range(code, start_date, end_date)
-                
-                if historical_bars:
-                    df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
-                    if self.config.enable_realtime_quote and realtime_quote:
-                        df = self._augment_historical_with_realtime(df, realtime_quote, code)
-                    trend_result = self.trend_analyzer.analyze(df, code)
-                    logger.info(f"{stock_name}({code}) 趋势分析: {trend_result.trend_status.value}")
+                if "-USD" in code.upper():
+                    df_crypto = self._get_crypto_data(code, days=150)
+                    if df_crypto is not None and not df_crypto.empty:
+                        # 💡 核心防御：手动把今日实时现价拼接到 DataFrame 中，绕过系统周末休市的拦截！
+                        if realtime_quote and hasattr(realtime_quote, 'price') and realtime_quote.price > 0:
+                            last_date = df_crypto['date'].iloc[-1]
+                            today_date = date.today()
+                            
+                            if last_date < today_date: # Kraken还没更新今天的数据，增加一行
+                                new_row = {
+                                    'date': today_date,
+                                    'open': getattr(realtime_quote, 'open_price', realtime_quote.price),
+                                    'high': getattr(realtime_quote, 'high', realtime_quote.price),
+                                    'low': getattr(realtime_quote, 'low', realtime_quote.price),
+                                    'close': realtime_quote.price,
+                                    'volume': getattr(realtime_quote, 'volume', 0),
+                                    'amount': getattr(realtime_quote, 'amount', 0),
+                                    'pct_chg': getattr(realtime_quote, 'change_pct', 0),
+                                    'turnover': 0.0,
+                                    'code': code
+                                }
+                                df_crypto = pd.concat([df_crypto, pd.DataFrame([new_row])], ignore_index=True)
+                            else: # 直接覆盖最后一行
+                                df_crypto.loc[df_crypto.index[-1], 'close'] = realtime_quote.price
+                        
+                        # 喂给引擎！150天数据+标准Date对象+周末现价，绝对不会再崩溃！
+                        trend_result = self.trend_analyzer.analyze(df_crypto, code)
+                        if trend_result:
+                            logger.info(f"{stock_name}({code}) Crypto均线计算成功! MA5={trend_result.ma5:.2f}")
                 else:
-                    logger.warning(f"{stock_name}({code}) 数据库无数据，趋势分析失效")
+                    # ==========================================
+                    # 原有股票逻辑：老老实实从数据库读取
+                    # ==========================================
+                    end_date = date.today()
+                    start_date = end_date - timedelta(days=89)
+                    historical_bars = self.db.get_data_range(code, start_date, end_date)
+                    if historical_bars:
+                        df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
+                        if self.config.enable_realtime_quote and realtime_quote:
+                            df = self._augment_historical_with_realtime(df, realtime_quote, code)
+                        trend_result = self.trend_analyzer.analyze(df, code)
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 趋势分析失败: {e}", exc_info=True)
-
-            # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
-            news_context = None
-            if self.search_service.is_available:
-                logger.info(f"{stock_name}({code}) 开始多维度情报搜索...")
-
-                # 使用多维度搜索（最多5次搜索）
-                intel_results = self.search_service.search_comprehensive_intel(
-                    stock_code=code,
-                    stock_name=stock_name,
-                    max_searches=5
-                )
-
-                # 格式化情报报告
-                if intel_results:
-                    news_context = self.search_service.format_intel_report(intel_results, stock_name)
-                    total_results = sum(
-                        len(r.results) for r in intel_results.values() if r.success
-                    )
-                    logger.info(f"{stock_name}({code}) 情报搜索完成: 共 {total_results} 条结果")
-                    logger.debug(f"{stock_name}({code}) 情报搜索结果:\n{news_context}")
-
-                    # 保存新闻情报到数据库（用于后续复盘与查询）
-                    try:
-                        query_context = self._build_query_context(query_id=query_id)
-                        for dim_name, response in intel_results.items():
-                            if response and response.success and response.results:
-                                self.db.save_news_intel(
-                                    code=code,
-                                    name=stock_name,
-                                    dimension=dim_name,
-                                    query=response.query,
-                                    response=response,
-                                    query_context=query_context
-                                )
-                    except Exception as e:
-                        logger.warning(f"{stock_name}({code}) 保存新闻情报失败: {e}")
-            else:
-                logger.info(f"{stock_name}({code}) 搜索服务不可用，跳过情报搜索")
 
             # Step 5: 获取分析上下文（技术面数据）
             context = self.db.get_analysis_context(code)
