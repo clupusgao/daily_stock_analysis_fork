@@ -623,10 +623,17 @@ class StockAnalysisPipeline:
         try:
             from src.agent.factory import build_agent_executor
 
-            # Build executor from shared factory (ToolRegistry and SkillManager prototype are cached)
+            # Build executor from shared factory
             executor = build_agent_executor(self.config, getattr(self.config, 'agent_skills', None) or None)
 
-            # Build initial context to avoid redundant tool calls
+            # ==========================================
+            # 🚀 宏观插件：获取恐慌贪婪指数
+            # ==========================================
+            fng_index = None
+            if "-USD" in code.upper():
+                fng_index = self._get_fear_and_greed_index()
+
+            # Build initial context
             initial_context = {
                 "stock_code": code,
                 "stock_name": stock_name,
@@ -637,17 +644,43 @@ class StockAnalysisPipeline:
                 initial_context["realtime_quote"] = self._safe_to_dict(realtime_quote)
             if chip_data:
                 initial_context["chip_distribution"] = self._safe_to_dict(chip_data)
+            if fng_index:
+                initial_context["macro_sentiment_fng"] = fng_index
+
+            # ==========================================
+            # 💡 核心注入：在 Agent 模式调用 Kraken 引擎并计算均线
+            # ==========================================
+            if "-USD" in code.upper():
+                import pandas as pd
+                df_c = self._get_crypto_data(code, days=60)
+                if df_c is not None and not df_c.empty:
+                    # 追加实时现价
+                    if realtime_quote and hasattr(realtime_quote, 'price') and realtime_quote.price > 0:
+                        df_c.loc[len(df_c)] = {'close': realtime_quote.price}
+                    
+                    # 极速手算均线
+                    ma5 = df_c['close'].rolling(5).mean().iloc[-1]
+                    ma10 = df_c['close'].rolling(10).mean().iloc[-1]
+                    ma20 = df_c['close'].rolling(20).mean().iloc[-1]
+                    
+                    if pd.notna(ma20):
+                        # 强制把算好的均线塞进 Agent 的初始上下文中！
+                        initial_context['crypto_moving_averages'] = {
+                            "MA5": round(float(ma5), 2), 
+                            "MA10": round(float(ma10), 2), 
+                            "MA20": round(float(ma20), 2)
+                        }
+                        logger.info(f"{stock_name}({code}) Agent内存均线注入成功! MA5={round(ma5, 2)}")
 
             # 运行 Agent
             message = f"请分析股票 {code} ({stock_name})，并生成决策仪表盘报告。"
             agent_result = executor.run(message, context=initial_context)
 
-            # 转换为 AnalysisResult
+            # 转换为 AnalysisResult (保留原装转换引擎，绝对不报错)
             result = self._agent_result_to_analysis_result(agent_result, code, stock_name, report_type, query_id)
             resolved_stock_name = result.name if result and result.name else stock_name
 
-            # 保存新闻情报到数据库（Agent 工具结果仅用于 LLM 上下文，未持久化，Fixes #396）
-            # 使用 search_stock_news（与 Agent 工具调用逻辑一致），仅 1 次 API 调用，无额外延迟
+            # 保存新闻情报到数据库 (保留原装逻辑)
             if self.search_service.is_available:
                 try:
                     news_response = self.search_service.search_stock_news(
@@ -669,7 +702,7 @@ class StockAnalysisPipeline:
                 except Exception as e:
                     logger.warning(f"[{code}] Agent 模式保存新闻情报失败: {e}")
 
-            # 保存分析历史记录
+            # 保存分析历史记录 (保留原装逻辑)
             if result:
                 try:
                     initial_context["stock_name"] = resolved_stock_name
