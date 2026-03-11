@@ -327,23 +327,53 @@ class StockAnalysisPipeline:
                 return self._analyze_with_agent(code, report_type, query_id, stock_name, realtime_quote, chip_data)
             
             # Step 3: 趋势分析（基于交易理念）
-            trend_result: Optional[TrendAnalysisResult] = None
+            trend_result = None
             try:
                 if "-USD" in code.upper():
-                    logger.info(f"{stock_name}({code}) 进入加密货币内存分析...")
+                    # 💡 真正调用我们写好的 Kraken 引擎，绝对不再用 yfinance！
                     crypto_res = self._get_crypto_data(code, days=150)
                     if crypto_res is not None:
                         df_crypto, _ = crypto_res
                         if df_crypto is not None and not df_crypto.empty:
-                            # 统一日期格式
+                            # 统一日期格式，满足底层分析器要求
                             df_crypto['date'] = pd.to_datetime(df_crypto['date'])
                             df_crypto['trade_date'] = df_crypto['date']
                             
-                            # 注入最新价
+                            # 注入实时现价，让乖离率绝对精准
                             if realtime_quote and hasattr(realtime_quote, 'price') and realtime_quote.price > 0:
-                                df_crypto.loc[df_crypto.index[-1], 'close'] = realtime_quote.price
+                                last_date = df_crypto['date'].iloc[-1].date()
+                                today_date = date.today()
                                 
-                            # 因为我们在引擎里已经算好了 MA60 等数据，所以这里直接喂入绝对不会崩！
+                                if last_date < today_date:
+                                    # 如果今天的数据还没收盘，新增一行今天的实时数据
+                                    new_row = pd.DataFrame([{
+                                        'date': pd.to_datetime(today_date),
+                                        'trade_date': pd.to_datetime(today_date),
+                                        'open': getattr(realtime_quote, 'open_price', realtime_quote.price),
+                                        'high': getattr(realtime_quote, 'high', realtime_quote.price),
+                                        'low': getattr(realtime_quote, 'low', realtime_quote.price),
+                                        'close': realtime_quote.price,
+                                        'volume': getattr(realtime_quote, 'volume', 0),
+                                        'amount': getattr(realtime_quote, 'amount', 0),
+                                        'pct_chg': getattr(realtime_quote, 'change_pct', 0),
+                                        'turnover': 0.0,
+                                        'code': code
+                                    }])
+                                    df_crypto = pd.concat([df_crypto, new_row], ignore_index=True)
+                                else:
+                                    # 否则直接更新最后一行的现价
+                                    df_crypto.loc[df_crypto.index[-1], 'close'] = realtime_quote.price
+
+                            # 🌟 重新计算一遍加入了实时现价的完美均线！
+                            df_crypto['ma5'] = df_crypto['close'].rolling(5).mean()
+                            df_crypto['ma10'] = df_crypto['close'].rolling(10).mean()
+                            df_crypto['ma20'] = df_crypto['close'].rolling(20).mean()
+                            df_crypto['ma60'] = df_crypto['close'].rolling(60).mean()
+                            
+                            # 剔除无法计算 MA60 的冗余数据
+                            df_crypto = df_crypto.dropna(subset=['ma60']).reset_index(drop=True)
+                            
+                            # 送入引擎运算！
                             trend_result = self.trend_analyzer.analyze(df_crypto, code)
                 else:
                     # ==========================================
@@ -358,7 +388,7 @@ class StockAnalysisPipeline:
                             df = self._augment_historical_with_realtime(df, realtime_quote, code)
                         trend_result = self.trend_analyzer.analyze(df, code)
             except Exception as e:
-                logger.warning(f"{stock_name}({code}) 趋势分析失败: {e}", exc_info=True)
+                logger.warning(f"趋势分析失败: {e}", exc_info=True)
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
             news_context = None
