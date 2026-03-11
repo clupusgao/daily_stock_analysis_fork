@@ -105,12 +105,11 @@ class StockAnalysisPipeline:
         else:
             logger.warning("搜索服务未启用（未配置 API Key）")
 
-    def _get_crypto_data(self, code: str, days: int = 60):
-        """原生 Kraken API 引擎 (无视云端封锁，完美适配本地趋势计算引擎)"""
+    def _get_crypto_data(self, code: str, days: int = 100): # 💡 提取100天，确保均线计算充分
+        """原生 Kraken API 引擎 (完美适配本地数据库)"""
         import requests, pandas as pd
         from datetime import datetime
         
-        # 转换为 Kraken 支持的格式 (ETHUSD)
         symbol = code.upper().replace("-USD", "USD").replace("-", "") 
         url = f"https://api.kraken.com/0/public/OHLC?pair={symbol}&interval=1440"
         
@@ -119,8 +118,7 @@ class StockAnalysisPipeline:
             res = requests.get(url, headers=headers, timeout=10)
             data = res.json()
             
-            if data.get('error'):
-                return None, "kraken_error"
+            if data.get('error'): return None, "kraken_error"
                 
             result = data.get('result', {})
             pair_key =[k for k in result.keys() if k != 'last'][0]
@@ -128,11 +126,10 @@ class StockAnalysisPipeline:
             
             records = []
             for row in klines[-days:]:
-                # 💡 核心修复：必须生成标准的 YYYY-MM-DD 字符串，并同时赋予 date 和 trade_date 列！
                 dt_str = datetime.fromtimestamp(row[0]).strftime('%Y-%m-%d')
                 records.append({
                     "date": dt_str,
-                    "trade_date": dt_str,  # <-- 趋势分析器死死盯着的这一列！
+                    "trade_date": dt_str,
                     "open": float(row[1]),
                     "high": float(row[2]),
                     "low": float(row[3]),
@@ -142,17 +139,24 @@ class StockAnalysisPipeline:
                 })
                 
             df = pd.DataFrame(records)
-            if df.empty:
-                return None, "kraken_empty"
+            if df.empty: return None, "kraken_empty"
                 
             df['pct_chg'] = df['close'].pct_change() * 100
             df['pct_chg'] = df['pct_chg'].fillna(0)
+            df['turnover'] = 0.0
             df['code'] = code
+            
+            # ==========================================
+            # 💡 核心防御：存入数据库前，强制算好均线！
+            # ==========================================
+            df['ma5'] = df['close'].rolling(window=5).mean()
+            df['ma10'] = df['close'].rolling(window=10).mean()
+            df['ma20'] = df['close'].rolling(window=20).mean()
+            df = df.dropna().reset_index(drop=True) # 扔掉算不出均线的最早 20 天
+            
             return df, "Kraken API"
             
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"Kraken 历史获取异常: {e}")
             return None, "kraken_exception"
 
     def _get_crypto_realtime(self, code: str):
@@ -332,50 +336,19 @@ class StockAnalysisPipeline:
             # Step 3: 趋势分析（基于交易理念）
             trend_result: Optional[TrendAnalysisResult] = None
             try:
-                if "-USD" in code.upper():
-                    logger.info(f"{stock_name}({code}) 正在内存中计算加密货币均线...")
-                    df_crypto, _ = self._get_crypto_data(code, days=60)
-                    if df_crypto is not None and not df_crypto.empty:
-                        # 转换日期格式，满足底层要求
-                        df_crypto['date'] = pd.to_datetime(df_crypto['date'])
-                        df_crypto['trade_date'] = df_crypto['date']
-                        df_crypto = df_crypto.sort_values('date').reset_index(drop=True)
-                        
-                        # 注入实时最新价
-                        if realtime_quote and hasattr(realtime_quote, 'price') and realtime_quote.price > 0:
-                            df_crypto.loc[df_crypto.index[-1], 'close'] = realtime_quote.price
-                            
-                        # ==========================================
-                        # 💡 终极修复：手动补齐分析器急需的所有计算列！
-                        # ==========================================
-                        # 用 Pandas 的 rolling 函数极其精准地算出各条均线
-                        df_crypto['ma5'] = df_crypto['close'].rolling(window=5).mean()
-                        df_crypto['ma10'] = df_crypto['close'].rolling(window=10).mean()
-                        df_crypto['ma20'] = df_crypto['close'].rolling(window=20).mean()
-                        df_crypto['turnover'] = 0.0  # 补齐换手率，防报错
-                        
-                        # 剔除因为算均线而产生的前 20 天空数据 (NaN)
-                        df_crypto = df_crypto.dropna().reset_index(drop=True)
-                            
-                        # 送入引擎运算！此时的 DataFrame 已经完美无瑕
-                        trend_result = self.trend_analyzer.analyze(df_crypto, code)
-                        if trend_result:
-                            logger.info(f"{stock_name}({code}) 加密均线计算成功! MA5={getattr(trend_result, 'ma5', 0)}")
+                # 🌟 真正的众生平等：加密货币与美股统一走数据库原生逻辑
+                end_date = date.today()
+                start_date = end_date - timedelta(days=89)
+                historical_bars = self.db.get_data_range(code, start_date, end_date)
+                
+                if historical_bars:
+                    df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
+                    if self.config.enable_realtime_quote and realtime_quote:
+                        df = self._augment_historical_with_realtime(df, realtime_quote, code)
+                    trend_result = self.trend_analyzer.analyze(df, code)
+                    logger.info(f"{stock_name}({code}) 趋势分析: {trend_result.trend_status.value}")
                 else:
-                    # ==========================================
-                    # 原有股票逻辑：老老实实从数据库读取
-                    # ==========================================
-                    end_date = date.today()
-                    start_date = end_date - timedelta(days=89)  # ~60 trading days for MA60
-                    historical_bars = self.db.get_data_range(code, start_date, end_date)
-                    if historical_bars:
-                        df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
-                        # Issue #234: Augment with realtime for intraday MA calculation
-                        if self.config.enable_realtime_quote and realtime_quote:
-                            df = self._augment_historical_with_realtime(df, realtime_quote, code)
-                        trend_result = self.trend_analyzer.analyze(df, code)
-                        logger.info(f"{stock_name}({code}) 趋势分析: {trend_result.trend_status.value}, "
-                                  f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}")
+                    logger.warning(f"{stock_name}({code}) 数据库无数据，趋势分析失效")
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 趋势分析失败: {e}", exc_info=True)
 
@@ -843,9 +816,11 @@ class StockAnalysisPipeline:
         )
         if not enable_realtime_tech:
             return df
-        market = get_market_for_stock(code)
-        if market and not is_market_open(market, date.today()):
-            return df
+        # 💡 核心防御：如果是加密货币，无视美股周末休市，强行放行！
+        if "-USD" not in code.upper():
+            market = get_market_for_stock(code)
+            if market and not is_market_open(market, date.today()):
+                return df
 
         last_val = df['date'].max()
         last_date = (
