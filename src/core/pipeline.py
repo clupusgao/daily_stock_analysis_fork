@@ -106,87 +106,87 @@ class StockAnalysisPipeline:
             logger.warning("搜索服务未启用（未配置 API Key）")
 
     def _get_crypto_data(self, code: str, days: int = 60):
-        """原生 Yahoo API 引擎 (完全绕过 yfinance 库，纯 JSON 解析，免疫报错)"""
+        """原生 Kraken API 引擎 (无视云端封锁，完美适配本地趋势计算引擎)"""
         import requests, pandas as pd
         from datetime import datetime
         
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}?interval=1d&range={days}d"
-        # 伪装成真实的 Chrome 浏览器，绝对不会被拦截
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        # 转换为 Kraken 支持的格式 (ETHUSD)
+        symbol = code.upper().replace("-USD", "USD").replace("-", "") 
+        url = f"https://api.kraken.com/0/public/OHLC?pair={symbol}&interval=1440"
         
         try:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             res = requests.get(url, headers=headers, timeout=10)
-            data = res.json()['chart']['result'][0]
-            timestamps = data['timestamp']
-            quote = data['indicators']['quote'][0]
+            data = res.json()
             
-            records =[]
-            for i in range(len(timestamps)):
-                if quote['close'][i] is not None:  # 剔除空数据
-                    dt_str = datetime.fromtimestamp(timestamps[i]).strftime('%Y-%m-%d')
-                    records.append({
-                        "date": dt_str,
-                        "trade_date": dt_str,  # 💡 核心修复：喂给分析器必须的 trade_date 列！
-                        "open": float(quote['open'][i]),
-                        "high": float(quote['high'][i]),
-                        "low": float(quote['low'][i]),
-                        "close": float(quote['close'][i]),
-                        "volume": float(quote['volume'][i]),
-                        "amount": float(quote['close'][i]) * float(quote['volume'][i])
-                    })
+            if data.get('error'):
+                return None, "kraken_error"
+                
+            result = data.get('result', {})
+            pair_key =[k for k in result.keys() if k != 'last'][0]
+            klines = result[pair_key]
+            
+            records = []
+            for row in klines[-days:]:
+                # 💡 核心修复：必须生成标准的 YYYY-MM-DD 字符串，并同时赋予 date 和 trade_date 列！
+                dt_str = datetime.fromtimestamp(row[0]).strftime('%Y-%m-%d')
+                records.append({
+                    "date": dt_str,
+                    "trade_date": dt_str,  # <-- 趋势分析器死死盯着的这一列！
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[6]),
+                    "amount": float(row[4]) * float(row[6])
+                })
+                
             df = pd.DataFrame(records)
+            if df.empty:
+                return None, "kraken_empty"
+                
             df['pct_chg'] = df['close'].pct_change() * 100
             df['pct_chg'] = df['pct_chg'].fillna(0)
             df['code'] = code
-            return df, "YFinance Native"
+            return df, "Kraken API"
+            
         except Exception as e:
             import logging
-            logging.getLogger(__name__).error(f"Crypto原生历史获取异常: {e}")
-            return None, "yf_native"
+            logging.getLogger(__name__).error(f"Kraken 历史获取异常: {e}")
+            return None, "kraken_exception"
 
     def _get_crypto_realtime(self, code: str):
-        """原生 Yahoo API 实时引擎"""
+        """原生 Kraken API 实时引擎"""
         import requests
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}?interval=1d&range=5d"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        symbol = code.upper().replace("-USD", "USD").replace("-", "")
+        url = f"https://api.kraken.com/0/public/Ticker?pair={symbol}"
         try:
-            res = requests.get(url, headers=headers, timeout=10)
-            data = res.json()['chart']['result'][0]
-            quote_data = data['indicators']['quote'][0]
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            resp = requests.get(url, headers=headers, timeout=10)
+            data = resp.json()
+            if data.get('error'):
+                return None
+            result = data.get('result', {})
+            pair_key = list(result.keys())[0]
+            ticker = result[pair_key]
             
             class CryptoQuote: pass
             quote = CryptoQuote()
             quote.name = code
-            
-            # 提取最新的有效数值
-            closes =[c for c in quote_data['close'] if c is not None]
-            opens =[o for o in quote_data['open'] if o is not None]
-            highs = [h for h in quote_data['high'] if h is not None]
-            lows = [l for l in quote_data['low'] if l is not None]
-            vols = [v for v in quote_data['volume'] if v is not None]
-            
-            quote.price = float(closes[-1])
-            quote.open_price = float(opens[-1])
-            quote.high = float(highs[-1])
-            quote.low = float(lows[-1])
-            quote.volume = float(vols[-1])
-            quote.amount = quote.price * quote.volume
-            
-            if len(closes) > 1:
-                quote.pre_close = float(closes[-2])
-                quote.change_pct = (quote.price - quote.pre_close) / quote.pre_close * 100
-            else:
-                quote.pre_close = quote.price
-                quote.change_pct = 0.0
-                
+            quote.price = float(ticker['c'][0])
+            quote.open_price = float(ticker['o'])
+            quote.high = float(ticker['h'][0])
+            quote.low = float(ticker['l'][0])
+            quote.volume = float(ticker['v'][0])
+            quote.amount = quote.volume * quote.price
+            quote.pre_close = float(ticker['o'])
+            quote.change_pct = (quote.price - quote.pre_close) / quote.pre_close * 100
             quote.turnover_rate = None
             quote.volume_ratio = 1.0
             return quote
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"Crypto原生实时获取异常: {e}")
             return None
-
+            
     def _get_fear_and_greed_index(self):
         """华尔街级宏观插件：获取全球加密市场恐慌与贪婪指数"""
         import requests
@@ -336,19 +336,19 @@ class StockAnalysisPipeline:
                     logger.info(f"{stock_name}({code}) 正在内存中计算加密货币均线...")
                     df_crypto, _ = self._get_crypto_data(code, days=60)
                     if df_crypto is not None and not df_crypto.empty:
-                        # 将字符串转为标准的 datetime 格式
+                        # 将字符串日期转为标准时间格式，确保引擎无缝衔接
                         df_crypto['date'] = pd.to_datetime(df_crypto['date'])
-                        df_crypto['trade_date'] = df_crypto['date']  # 💡 再次上保险，绝不让引擎找不到列
-                        df_crypto = df_crypto.sort_values('date').reset_index(drop=True)
+                        df_crypto['trade_date'] = pd.to_datetime(df_crypto['trade_date'])
                         
-                        # 注入实时最新价
+                        # 注入实时最新价，使得乖离率准确无误
                         if realtime_quote and hasattr(realtime_quote, 'price') and realtime_quote.price > 0:
                             idx = df_crypto.index[-1]
                             df_crypto.loc[idx, 'close'] = realtime_quote.price
                             
                         # 送入引擎运算！
                         trend_result = self.trend_analyzer.analyze(df_crypto, code)
-                        logger.info(f"{stock_name}({code}) 加密均线计算成功!")
+                        if trend_result:
+                            logger.info(f"{stock_name}({code}) 加密均线计算成功! MA5={trend_result.ma5:.2f}")
                 else:
                     # ==========================================
                     # 原有股票逻辑：老老实实从数据库读取
