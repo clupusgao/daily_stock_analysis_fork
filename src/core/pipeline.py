@@ -336,19 +336,31 @@ class StockAnalysisPipeline:
                     logger.info(f"{stock_name}({code}) 正在内存中计算加密货币均线...")
                     df_crypto, _ = self._get_crypto_data(code, days=60)
                     if df_crypto is not None and not df_crypto.empty:
-                        # 将字符串日期转为标准时间格式，确保引擎无缝衔接
+                        # 转换日期格式，满足底层要求
                         df_crypto['date'] = pd.to_datetime(df_crypto['date'])
-                        df_crypto['trade_date'] = pd.to_datetime(df_crypto['trade_date'])
+                        df_crypto['trade_date'] = df_crypto['date']
+                        df_crypto = df_crypto.sort_values('date').reset_index(drop=True)
                         
-                        # 注入实时最新价，使得乖离率准确无误
+                        # 注入实时最新价
                         if realtime_quote and hasattr(realtime_quote, 'price') and realtime_quote.price > 0:
-                            idx = df_crypto.index[-1]
-                            df_crypto.loc[idx, 'close'] = realtime_quote.price
+                            df_crypto.loc[df_crypto.index[-1], 'close'] = realtime_quote.price
                             
-                        # 送入引擎运算！
+                        # ==========================================
+                        # 💡 终极修复：手动补齐分析器急需的所有计算列！
+                        # ==========================================
+                        # 用 Pandas 的 rolling 函数极其精准地算出各条均线
+                        df_crypto['ma5'] = df_crypto['close'].rolling(window=5).mean()
+                        df_crypto['ma10'] = df_crypto['close'].rolling(window=10).mean()
+                        df_crypto['ma20'] = df_crypto['close'].rolling(window=20).mean()
+                        df_crypto['turnover'] = 0.0  # 补齐换手率，防报错
+                        
+                        # 剔除因为算均线而产生的前 20 天空数据 (NaN)
+                        df_crypto = df_crypto.dropna().reset_index(drop=True)
+                            
+                        # 送入引擎运算！此时的 DataFrame 已经完美无瑕
                         trend_result = self.trend_analyzer.analyze(df_crypto, code)
                         if trend_result:
-                            logger.info(f"{stock_name}({code}) 加密均线计算成功! MA5={trend_result.ma5:.2f}")
+                            logger.info(f"{stock_name}({code}) 加密均线计算成功! MA5={getattr(trend_result, 'ma5', 0)}")
                 else:
                     # ==========================================
                     # 原有股票逻辑：老老实实从数据库读取
